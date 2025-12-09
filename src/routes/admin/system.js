@@ -2,12 +2,16 @@ const express = require('express')
 const fs = require('fs')
 const path = require('path')
 const axios = require('axios')
+const { exec, spawn } = require('child_process')
+const { promisify } = require('util')
 const claudeCodeHeadersService = require('../../services/claudeCodeHeadersService')
 const claudeAccountService = require('../../services/claudeAccountService')
 const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const config = require('../../../config/config')
+
+const execAsync = promisify(exec)
 
 const router = express.Router()
 
@@ -249,6 +253,243 @@ router.get('/check-updates', authenticateAdmin, async (req, res) => {
         warning: error.message || 'Failed to check for updates'
       }
     })
+  }
+})
+
+// ==================== 一键更新功能 ====================
+
+// 获取更新配置
+router.get('/update-config', authenticateAdmin, async (req, res) => {
+  try {
+    const client = redis.getClient()
+    const updateConfig = await client.get('system:update_config')
+
+    const defaultConfig = {
+      gitRemote: 'git@github.com:Wei-Shaw/claude-relay-service.git',
+      updatedAt: null
+    }
+
+    let configData = defaultConfig
+    if (updateConfig) {
+      try {
+        configData = { ...defaultConfig, ...JSON.parse(updateConfig) }
+      } catch (err) {
+        logger.warn('⚠️ Failed to parse update config, using defaults:', err.message)
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: configData
+    })
+  } catch (error) {
+    logger.error('❌ Failed to get update config:', error)
+    return res.status(500).json({ error: 'Failed to get update config', message: error.message })
+  }
+})
+
+// 保存更新配置
+router.put('/update-config', authenticateAdmin, async (req, res) => {
+  try {
+    const { gitRemote } = req.body
+
+    if (!gitRemote || typeof gitRemote !== 'string') {
+      return res.status(400).json({ error: 'Git remote URL is required' })
+    }
+
+    const configData = {
+      gitRemote: gitRemote.trim(),
+      updatedAt: new Date().toISOString()
+    }
+
+    const client = redis.getClient()
+    await client.set('system:update_config', JSON.stringify(configData))
+
+    logger.info(`✅ Update config saved: ${gitRemote}`)
+
+    return res.json({
+      success: true,
+      message: 'Update config saved successfully',
+      data: configData
+    })
+  } catch (error) {
+    logger.error('❌ Failed to save update config:', error)
+    return res.status(500).json({ error: 'Failed to save update config', message: error.message })
+  }
+})
+
+// 一键更新
+router.post('/one-click-update', authenticateAdmin, async (req, res) => {
+  const projectRoot = path.join(__dirname, '../../..')
+  const logs = []
+
+  const addLog = (type, message) => {
+    const logEntry = { type, message, time: new Date().toISOString() }
+    logs.push(logEntry)
+    if (type === 'error') {
+      logger.error(`❌ Update: ${message}`)
+    } else {
+      logger.info(`📦 Update: ${message}`)
+    }
+  }
+
+  try {
+    addLog('info', '开始一键更新...')
+
+    // 获取配置的 git remote
+    const client = redis.getClient()
+    const updateConfig = await client.get('system:update_config')
+    let gitRemote = 'git@github.com:Wei-Shaw/claude-relay-service.git'
+
+    if (updateConfig) {
+      try {
+        const config = JSON.parse(updateConfig)
+        if (config.gitRemote) {
+          gitRemote = config.gitRemote
+        }
+      } catch (err) {
+        addLog('warn', `解析更新配置失败，使用默认值: ${err.message}`)
+      }
+    }
+
+    // Step 1: 设置 git remote（如果需要）
+    addLog('info', `设置 Git 远程地址: ${gitRemote}`)
+    try {
+      await execAsync(`git remote set-url origin "${gitRemote}"`, { cwd: projectRoot })
+      addLog('success', 'Git 远程地址设置成功')
+    } catch (err) {
+      // 如果 origin 不存在，尝试添加
+      try {
+        await execAsync(`git remote add origin "${gitRemote}"`, { cwd: projectRoot })
+        addLog('success', 'Git 远程地址添加成功')
+      } catch (addErr) {
+        addLog('warn', `设置远程地址时出现警告: ${addErr.message}`)
+      }
+    }
+
+    // Step 2: Git fetch
+    addLog('info', '获取远程更新...')
+    try {
+      const { stdout: fetchOut } = await execAsync('git fetch origin', {
+        cwd: projectRoot,
+        timeout: 60000
+      })
+      addLog('success', `Git fetch 完成: ${fetchOut || '无输出'}`)
+    } catch (err) {
+      addLog('error', `Git fetch 失败: ${err.message}`)
+      return res.status(500).json({
+        success: false,
+        message: 'Git fetch 失败',
+        error: err.message,
+        logs
+      })
+    }
+
+    // Step 3: Git pull
+    addLog('info', '拉取最新代码...')
+    try {
+      const { stdout: pullOut, stderr: pullErr } = await execAsync('git pull origin main', {
+        cwd: projectRoot,
+        timeout: 120000
+      })
+      const pullMessage = pullOut || pullErr || '无输出'
+      addLog('success', `Git pull 完成: ${pullMessage.trim()}`)
+
+      // 检查是否已经是最新
+      if (pullMessage.includes('Already up to date') || pullMessage.includes('已经是最新')) {
+        addLog('info', '代码已是最新版本')
+      }
+    } catch (err) {
+      addLog('error', `Git pull 失败: ${err.message}`)
+      return res.status(500).json({
+        success: false,
+        message: 'Git pull 失败，可能存在冲突或权限问题',
+        error: err.message,
+        logs
+      })
+    }
+
+    // Step 4: 安装依赖
+    addLog('info', '安装依赖...')
+    try {
+      const { stdout: npmOut } = await execAsync('npm install', {
+        cwd: projectRoot,
+        timeout: 300000 // 5分钟超时
+      })
+      addLog('success', 'npm install 完成')
+    } catch (err) {
+      addLog('warn', `npm install 警告: ${err.message}`)
+      // npm install 警告不阻止更新
+    }
+
+    // Step 5: 读取新版本号
+    let newVersion = 'unknown'
+    try {
+      const versionPath = path.join(projectRoot, 'VERSION')
+      newVersion = fs.readFileSync(versionPath, 'utf8').trim()
+      addLog('success', `新版本: ${newVersion}`)
+    } catch (err) {
+      addLog('warn', `读取版本号失败: ${err.message}`)
+    }
+
+    // Step 6: 重启服务（延迟执行，让响应先返回）
+    addLog('info', '准备重启服务...')
+
+    // 先返回成功响应
+    res.json({
+      success: true,
+      message: '更新完成，服务将在 3 秒后重启',
+      newVersion,
+      logs
+    })
+
+    // 延迟重启，确保响应已发送
+    setTimeout(() => {
+      logger.info('🔄 正在重启服务...')
+
+      // 使用 spawn 而不是 exec，避免阻塞
+      const restart = spawn('npm', ['run', 'service:restart:daemon'], {
+        cwd: projectRoot,
+        detached: true,
+        stdio: 'ignore'
+      })
+
+      restart.unref()
+    }, 3000)
+  } catch (error) {
+    addLog('error', `更新失败: ${error.message}`)
+    logger.error('❌ One-click update failed:', error)
+
+    return res.status(500).json({
+      success: false,
+      message: '更新过程中出现错误',
+      error: error.message,
+      logs
+    })
+  }
+})
+
+// 获取更新状态（用于检查服务是否已重启）
+router.get('/update-status', authenticateAdmin, async (req, res) => {
+  try {
+    const versionPath = path.join(__dirname, '../../../VERSION')
+    let currentVersion = '1.0.0'
+    try {
+      currentVersion = fs.readFileSync(versionPath, 'utf8').trim()
+    } catch (err) {
+      logger.warn('⚠️ Could not read VERSION file:', err.message)
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        version: currentVersion,
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString()
+      }
+    })
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message })
   }
 })
 

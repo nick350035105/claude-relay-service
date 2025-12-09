@@ -40,7 +40,8 @@ const tabRouteMap = computed(() => {
     apiKeys: '/api-keys',
     accounts: '/accounts',
     tutorial: '/tutorial',
-    settings: '/settings'
+    settings: '/settings',
+    requestLogs: '/request-logs'
   }
 
   // 只有在 LDAP 启用时才包含用户管理路由
@@ -68,7 +69,8 @@ const initActiveTab = () => {
       ApiKeys: 'apiKeys',
       Accounts: 'accounts',
       Tutorial: 'tutorial',
-      Settings: 'settings'
+      Settings: 'settings',
+      RequestLogs: 'requestLogs'
     }
     if (routeName && nameToTabMap[routeName]) {
       activeTab.value = nameToTabMap[routeName]
@@ -97,7 +99,8 @@ watch(
         ApiKeys: 'apiKeys',
         Accounts: 'accounts',
         Tutorial: 'tutorial',
-        Settings: 'settings'
+        Settings: 'settings',
+        RequestLogs: 'requestLogs'
       }
       if (routeName && nameToTabMap[routeName]) {
         activeTab.value = nameToTabMap[routeName]

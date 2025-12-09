@@ -86,13 +86,25 @@
                     >v{{ versionInfo.latest }}</span
                   >
                 </div>
-                <a
-                  class="block w-full rounded-lg bg-green-500 px-3 py-1.5 text-center text-sm text-white transition-colors hover:bg-green-600"
-                  :href="versionInfo.releaseInfo?.htmlUrl || '#'"
-                  target="_blank"
-                >
-                  <i class="fas fa-external-link-alt mr-1" />查看更新
-                </a>
+                <div class="flex gap-2">
+                  <a
+                    class="flex-1 rounded-lg bg-gray-100 px-3 py-1.5 text-center text-sm text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                    :href="versionInfo.releaseInfo?.htmlUrl || '#'"
+                    target="_blank"
+                  >
+                    <i class="fas fa-external-link-alt mr-1" />查看
+                  </a>
+                  <button
+                    class="flex-1 rounded-lg bg-blue-500 px-3 py-1.5 text-center text-sm text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                    :disabled="updateState.updating"
+                    @click="startOneClickUpdate"
+                  >
+                    <i
+                      class="mr-1"
+                      :class="updateState.updating ? 'fas fa-spinner fa-spin' : 'fas fa-download'"
+                    />{{ updateState.updating ? '更新中' : '一键更新' }}
+                  </button>
+                </div>
               </div>
               <div
                 v-else-if="versionInfo.checkingUpdate"
@@ -143,6 +155,110 @@
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 一键更新进度模态框 -->
+  <div
+    v-if="updateState.showModal"
+    class="modal fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4"
+  >
+    <div class="modal-content mx-auto flex max-h-[90vh] w-full max-w-lg flex-col p-4 sm:p-6 md:p-8">
+      <div class="mb-4 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div
+            class="flex h-10 w-10 items-center justify-center rounded-xl"
+            :class="
+              updateState.success
+                ? 'bg-gradient-to-br from-green-500 to-green-600'
+                : updateState.error
+                  ? 'bg-gradient-to-br from-red-500 to-red-600'
+                  : 'bg-gradient-to-br from-blue-500 to-blue-600'
+            "
+          >
+            <i
+              class="text-white"
+              :class="
+                updateState.updating
+                  ? 'fas fa-spinner fa-spin'
+                  : updateState.success
+                    ? 'fas fa-check'
+                    : updateState.error
+                      ? 'fas fa-times'
+                      : 'fas fa-download'
+              "
+            />
+          </div>
+          <h3 class="text-xl font-bold text-gray-900 dark:text-gray-100">
+            {{
+              updateState.updating ? '正在更新...' : updateState.success ? '更新成功' : '更新日志'
+            }}
+          </h3>
+        </div>
+        <button
+          v-if="!updateState.updating"
+          class="text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-300"
+          @click="closeUpdateModal"
+        >
+          <i class="fas fa-times text-xl" />
+        </button>
+      </div>
+
+      <!-- 更新日志 -->
+      <div
+        class="custom-scrollbar max-h-80 flex-1 overflow-y-auto rounded-lg bg-gray-900 p-4 font-mono text-sm"
+      >
+        <div v-for="(log, index) in updateState.logs" :key="index" class="mb-1">
+          <span class="text-gray-500">{{ log.time?.split('T')[1]?.split('.')[0] || '' }}</span>
+          <span
+            class="ml-2"
+            :class="{
+              'text-green-400': log.type === 'success',
+              'text-red-400': log.type === 'error',
+              'text-yellow-400': log.type === 'warn',
+              'text-blue-400': log.type === 'info'
+            }"
+          >
+            {{ log.message }}
+          </span>
+        </div>
+        <div v-if="updateState.updating" class="mt-2 flex items-center text-blue-400">
+          <i class="fas fa-spinner fa-spin mr-2" />
+          处理中...
+        </div>
+      </div>
+
+      <!-- 错误信息 -->
+      <div
+        v-if="updateState.error"
+        class="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-900/30"
+      >
+        <p class="text-sm text-red-700 dark:text-red-400">
+          <i class="fas fa-exclamation-circle mr-1" />
+          {{ updateState.error }}
+        </p>
+      </div>
+
+      <!-- 成功信息 -->
+      <div
+        v-if="updateState.success"
+        class="mt-4 rounded-lg border border-green-200 bg-green-50 p-3 dark:border-green-800 dark:bg-green-900/30"
+      >
+        <p class="text-sm text-green-700 dark:text-green-400">
+          <i class="fas fa-check-circle mr-1" />
+          更新成功！服务将自动重启，页面会自动刷新。
+        </p>
+      </div>
+
+      <!-- 关闭按钮 -->
+      <div v-if="!updateState.updating" class="mt-4 flex justify-end">
+        <button
+          class="rounded-xl bg-gray-100 px-6 py-2 font-semibold text-gray-700 transition-colors hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+          @click="closeUpdateModal"
+        >
+          关闭
+        </button>
       </div>
     </div>
   </div>
@@ -295,6 +411,15 @@ const versionInfo = ref({
   noUpdateMessage: false
 })
 
+// 一键更新状态
+const updateState = ref({
+  updating: false,
+  logs: [],
+  showModal: false,
+  error: null,
+  success: false
+})
+
 // 用户菜单状态
 const userMenuOpen = ref(false)
 
@@ -365,6 +490,86 @@ const checkForUpdates = async () => {
   } finally {
     versionInfo.value.checkingUpdate = false
   }
+}
+
+// 一键更新
+const startOneClickUpdate = async () => {
+  if (updateState.value.updating) {
+    return
+  }
+
+  // 确认更新
+  if (!confirm('确定要执行一键更新吗？\n\n更新过程中服务会短暂重启，请确保当前没有重要操作。')) {
+    return
+  }
+
+  updateState.value.updating = true
+  updateState.value.logs = []
+  updateState.value.error = null
+  updateState.value.success = false
+  updateState.value.showModal = true
+  userMenuOpen.value = false
+
+  try {
+    const result = await apiClient.post('/admin/one-click-update')
+
+    if (result.success) {
+      updateState.value.logs = result.logs || []
+      updateState.value.success = true
+      showToast(`更新成功！新版本: ${result.newVersion}，服务将在 3 秒后重启`, 'success')
+
+      // 等待服务重启后刷新页面
+      setTimeout(() => {
+        showToast('正在等待服务重启...', 'info')
+        waitForServiceRestart()
+      }, 5000)
+    } else {
+      updateState.value.error = result.message || '更新失败'
+      updateState.value.logs = result.logs || []
+      showToast(result.message || '更新失败', 'error')
+    }
+  } catch (error) {
+    updateState.value.error = error.message || '更新请求失败'
+    showToast('更新失败: ' + (error.message || '未知错误'), 'error')
+  } finally {
+    updateState.value.updating = false
+  }
+}
+
+// 等待服务重启
+const waitForServiceRestart = async () => {
+  const maxAttempts = 30 // 最多等待 30 秒
+  let attempts = 0
+
+  const checkService = async () => {
+    attempts++
+    try {
+      const result = await apiClient.get('/admin/update-status')
+      if (result.success) {
+        // 服务已重启成功
+        showToast('服务已重启，页面即将刷新', 'success')
+        setTimeout(() => {
+          window.location.reload()
+        }, 1500)
+        return
+      }
+    } catch (error) {
+      // 服务可能还在重启中
+    }
+
+    if (attempts < maxAttempts) {
+      setTimeout(checkService, 1000)
+    } else {
+      showToast('服务重启超时，请手动刷新页面', 'warning')
+    }
+  }
+
+  checkService()
+}
+
+// 关闭更新模态框
+const closeUpdateModal = () => {
+  updateState.value.showModal = false
 }
 
 // 打开修改密码弹窗

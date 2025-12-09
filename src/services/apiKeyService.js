@@ -119,6 +119,8 @@ class ApiKeyService {
       name,
       description,
       apiKey: hashedKey,
+      // 明文仅用于管理端展示与复制，不参与鉴权逻辑
+      apiKeyPlain: apiKey,
       tokenLimit: String(tokenLimit ?? 0),
       concurrencyLimit: String(concurrencyLimit ?? 0),
       rateLimitWindow: String(rateLimitWindow ?? 0),

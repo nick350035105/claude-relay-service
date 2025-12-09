@@ -912,6 +912,14 @@
                             <span class="ml-1">模型</span>
                           </button>
                           <button
+                            class="rounded px-2 py-1 text-xs font-medium text-purple-600 transition-colors hover:bg-purple-50 hover:text-purple-900 dark:hover:bg-purple-900/20"
+                            title="复制 Key"
+                            @click="copyApiKeyValue(key)"
+                          >
+                            <i class="fas fa-clipboard" />
+                            <span class="ml-1">复制</span>
+                          </button>
+                          <button
                             class="rounded px-2 py-1 text-xs font-medium text-blue-600 transition-colors hover:bg-blue-50 hover:text-blue-900 dark:hover:bg-blue-900/20"
                             title="编辑"
                             @click="openEditApiKeyModal(key)"
@@ -3797,6 +3805,68 @@ const handleRenewSuccess = () => {
   loadApiKeys()
 }
 
+// 获取可复制的 Key 文本（优先使用接口返回的 apiKey 字段，回退到 id）
+const getCopyableKeyValue = (key) => {
+  if (!key) return ''
+  // 优先使用后台存的明文 key（apiKeyPlain），否则退回哈希/ID
+  return key.apiKeyPlain || key.apiKey || key.key || key.id || ''
+}
+
+// 写入剪贴板（带回退逻辑）
+const writeToClipboard = async (text) => {
+  const canUseClipboardApi =
+    typeof navigator !== 'undefined' &&
+    navigator.clipboard &&
+    typeof navigator.clipboard.writeText === 'function' &&
+    (typeof window === 'undefined' || window.isSecureContext !== false)
+
+  if (canUseClipboardApi) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+
+  if (typeof document === 'undefined') {
+    throw new Error('clipboard unavailable')
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', '')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  textarea.style.pointerEvents = 'none'
+  document.body.appendChild(textarea)
+  textarea.select()
+
+  try {
+    const success = document.execCommand('copy')
+    document.body.removeChild(textarea)
+    if (!success) {
+      throw new Error('execCommand failed')
+    }
+  } catch (error) {
+    document.body.removeChild(textarea)
+    throw error
+  }
+}
+
+// 复制当前行的 Key
+const copyApiKeyValue = async (key) => {
+  const keyText = getCopyableKeyValue(key)
+  if (!keyText) {
+    showToast('当前列表没有可复制的 Key 值', 'warning')
+    return
+  }
+
+  try {
+    await writeToClipboard(keyText)
+    showToast('Key 已复制', 'success')
+  } catch (error) {
+    console.error('Failed to copy key:', error)
+    showToast('复制失败，请手动复制', 'error')
+  }
+}
+
 // 获取API Key的操作菜单项（用于ActionDropdown）
 const getApiKeyActions = (key) => {
   const actions = [
@@ -3806,6 +3876,13 @@ const getApiKeyActions = (key) => {
       icon: 'fa-edit',
       color: 'blue',
       handler: () => openEditApiKeyModal(key)
+    },
+    {
+      key: 'copy',
+      label: '复制 Key',
+      icon: 'fa-clipboard',
+      color: 'purple',
+      handler: () => copyApiKeyValue(key)
     }
   ]
 

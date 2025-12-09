@@ -20,7 +20,17 @@ const {
   sendMockWarmupStream
 } = require('../utils/warmupInterceptor')
 const { sanitizeUpstreamError } = require('../utils/errorSanitizer')
+const requestLogService = require('../services/requestLogService')
 const router = express.Router()
+
+// 辅助函数：记录请求日志
+async function recordRequestLog(logData) {
+  try {
+    await requestLogService.logRequest(logData)
+  } catch (error) {
+    logger.error('❌ Failed to record request log:', error)
+  }
+}
 
 function queueRateLimitUpdate(rateLimitInfo, usageSummary, model, context = '') {
   if (!rateLimitInfo) {
@@ -242,6 +252,7 @@ async function handleMessagesRequest(req, res) {
       // 流式响应不需要额外处理，中间件已经设置了监听器
 
       let usageDataCaptured = false
+      let collectedStreamOutput = null // 收集流式响应的完整输出
 
       // 生成会话哈希用于sticky会话
       const sessionHash = sessionHelper.generateSessionHash(req.body)
@@ -462,6 +473,54 @@ async function handleMessagesRequest(req, res) {
               )
 
               usageDataCaptured = true
+              // 收集流式响应输出用于日志 - 合并成简洁结构
+              if (usageData.collectedSseData && usageData.collectedSseData.length > 0) {
+                const sseData = usageData.collectedSseData
+                // 提取文本内容
+                let textContent = ''
+                let finishReason = ''
+                for (const event of sseData) {
+                  if (event.type === 'content_block_delta' && event.delta?.text) {
+                    textContent += event.delta.text
+                  }
+                  if (event.type === 'message_delta' && event.delta?.stop_reason) {
+                    finishReason = event.delta.stop_reason
+                  }
+                }
+                collectedStreamOutput = {
+                  finish_reason: finishReason,
+                  text: textContent,
+                  usage: {
+                    input_tokens: inputTokens,
+                    output_tokens: outputTokens,
+                    cache_creation_input_tokens: cacheCreateTokens,
+                    cache_read_input_tokens: cacheReadTokens,
+                    total_tokens: inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
+                  },
+                  model: model
+                }
+                // 直接在回调中记录日志，确保数据已收集完成
+                const streamDuration = Date.now() - startTime
+                recordRequestLog({
+                  apiKeyId: req.apiKey.id,
+                  apiKeyName: req.apiKey.name,
+                  accountId: usageAccountId || accountId,
+                  accountType: accountType,
+                  model: model,
+                  status: 'success',
+                  statusCode: 200,
+                  duration: streamDuration,
+                  inputTokens: inputTokens,
+                  outputTokens: outputTokens,
+                  cacheCreateTokens: cacheCreateTokens,
+                  cacheReadTokens: cacheReadTokens,
+                  clientIp: req.ip || req.connection?.remoteAddress,
+                  userAgent: req.headers['user-agent'],
+                  requestPath: req.path,
+                  input: JSON.stringify(req.body).substring(0, 10000),
+                  output: JSON.stringify(collectedStreamOutput).substring(0, 50000)
+                })
+              }
               logger.api(
                 `📊 Stream usage recorded (real) - Model: ${model}, Input: ${inputTokens}, Output: ${outputTokens}, Cache Create: ${cacheCreateTokens}, Cache Read: ${cacheReadTokens}, Total: ${inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens} tokens`
               )
@@ -702,14 +761,33 @@ async function handleMessagesRequest(req, res) {
         )
       }
 
-      // 流式请求完成后 - 如果没有捕获到usage数据，记录警告但不进行估算
+      // 流式请求完成后 - 如果没有捕获到usage数据，记录警告（日志在usageCallback中已记录）
       setTimeout(() => {
         if (!usageDataCaptured) {
           logger.warn(
             '⚠️ No usage data captured from SSE stream - no statistics recorded (official data only)'
           )
+          // 没有 usage 数据时也记录一条日志
+          const streamDuration = Date.now() - startTime
+          recordRequestLog({
+            apiKeyId: req.apiKey.id,
+            apiKeyName: req.apiKey.name,
+            accountId: accountId,
+            accountType: accountType,
+            model: req.body.model,
+            status: 'success',
+            statusCode: 200,
+            duration: streamDuration,
+            inputTokens: 0,
+            outputTokens: 0,
+            clientIp: req.ip || req.connection?.remoteAddress,
+            userAgent: req.headers['user-agent'],
+            requestPath: req.path,
+            input: JSON.stringify(req.body).substring(0, 10000),
+            output: '[no usage data captured]'
+          })
         }
-      }, 1000) // 1秒后检查
+      }, 2000) // 2秒后检查
     } else {
       // 🔍 检查客户端连接是否仍然有效（可能在并发排队等待期间断开）
       if (res.destroyed || res.socket?.destroyed || res.writableEnded) {
@@ -1073,6 +1151,35 @@ async function handleMessagesRequest(req, res) {
         logger.warn(
           '⚠️ No usage data recorded for non-stream request - no statistics recorded (official data only)'
         )
+      }
+
+      // 记录请求日志（非流式）
+      const nonStreamDuration = Date.now() - startTime
+      try {
+        const jsonData = response.body ? JSON.parse(response.body) : {}
+        const usage = jsonData.usage || {}
+        recordRequestLog({
+          apiKeyId: req.apiKey.id,
+          apiKeyName: req.apiKey.name,
+          accountId: response.accountId || accountId,
+          accountName: response.accountName,
+          accountType: accountType,
+          model: jsonData.model || req.body.model,
+          status: response.statusCode >= 200 && response.statusCode < 300 ? 'success' : 'error',
+          statusCode: response.statusCode,
+          duration: nonStreamDuration,
+          inputTokens: usage.input_tokens || 0,
+          outputTokens: usage.output_tokens || 0,
+          cacheCreateTokens: usage.cache_creation_input_tokens || 0,
+          cacheReadTokens: usage.cache_read_input_tokens || 0,
+          clientIp: req.ip || req.connection?.remoteAddress,
+          userAgent: req.headers['user-agent'],
+          requestPath: req.path,
+          input: JSON.stringify(req.body).substring(0, 10000),
+          output: (response.body || '').substring(0, 50000)
+        })
+      } catch (logError) {
+        logger.error('❌ Failed to record non-stream request log:', logError)
       }
     }
 

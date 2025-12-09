@@ -17,6 +17,16 @@ const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const { parseSSELine } = require('../utils/sseParser')
 const axios = require('axios')
 const ProxyHelper = require('../utils/proxyHelper')
+const requestLogService = require('../services/requestLogService')
+
+// 辅助函数：记录请求日志
+async function recordRequestLog(logData) {
+  try {
+    await requestLogService.logRequest(logData)
+  } catch (error) {
+    logger.error('❌ Failed to record Gemini request log:', error)
+  }
+}
 
 // ============================================================================
 // 工具函数
@@ -538,13 +548,14 @@ async function handleMessages(req, res) {
           candidatesTokenCount: 0,
           totalTokenCount: 0
         }
+        const collectedChunks = [] // 收集完整的响应 JSON 块
 
         geminiResponse.on('data', (chunk) => {
           try {
             const chunkStr = chunk.toString()
             res.write(chunkStr)
 
-            // 尝试从 SSE 流中提取 usage 数据
+            // 尝试从 SSE 流中提取 usage 数据和完整响应
             const lines = chunkStr.split('\n')
             for (const line of lines) {
               if (line.startsWith('data:')) {
@@ -555,6 +566,8 @@ async function handleMessages(req, res) {
                     if (parsed.usageMetadata || parsed.response?.usageMetadata) {
                       totalUsage = parsed.usageMetadata || parsed.response.usageMetadata
                     }
+                    // 收集完整的响应 JSON
+                    collectedChunks.push(parsed)
                   } catch (e) {
                     // 解析失败，忽略
                   }
@@ -568,6 +581,54 @@ async function handleMessages(req, res) {
 
         geminiResponse.on('end', () => {
           res.end()
+
+          const streamDuration = Date.now() - startTime
+          // 合并流式响应为一条清晰的结构
+          let textContent = ''
+          let finishReason = ''
+          for (const chunk of collectedChunks) {
+            const candidates = chunk.candidates || chunk.response?.candidates
+            if (candidates && candidates[0]) {
+              if (candidates[0].content?.parts) {
+                for (const part of candidates[0].content.parts) {
+                  if (part.text) {
+                    textContent += part.text
+                  }
+                }
+              }
+              if (candidates[0].finishReason) {
+                finishReason = candidates[0].finishReason
+              }
+            }
+          }
+          const mergedOutput = {
+            finish_reason: finishReason,
+            text: textContent,
+            usage: {
+              prompt_tokens: totalUsage.promptTokenCount || 0,
+              completion_tokens: totalUsage.candidatesTokenCount || 0,
+              total_tokens: totalUsage.totalTokenCount || 0
+            },
+            model: model
+          }
+          // 记录流式请求日志
+          recordRequestLog({
+            apiKeyId: apiKeyData.id,
+            apiKeyName: apiKeyData.name,
+            accountId: accountId,
+            accountType: 'gemini-api',
+            model: model,
+            status: 'success',
+            statusCode: 200,
+            duration: streamDuration,
+            inputTokens: totalUsage.promptTokenCount || 0,
+            outputTokens: totalUsage.candidatesTokenCount || 0,
+            clientIp: req.ip || req.connection?.remoteAddress,
+            userAgent: req.headers['user-agent'],
+            requestPath: req.path,
+            input: JSON.stringify(req.body).substring(0, 10000),
+            output: JSON.stringify(mergedOutput).substring(0, 50000)
+          })
 
           // 异步记录使用统计
           if (totalUsage.totalTokenCount > 0) {
@@ -607,17 +668,107 @@ async function handleMessages(req, res) {
         })
       } else {
         // OAuth 账户：使用原有的流式传输逻辑
+        const oauthCollectedChunks = []
         for await (const chunk of geminiResponse) {
           if (abortController.signal.aborted) {
             break
           }
           res.write(chunk)
+          // 尝试从 chunk 中提取完整响应 JSON
+          try {
+            const chunkStr = chunk.toString()
+            const lines = chunkStr.split('\n')
+            for (const line of lines) {
+              if (line.startsWith('data:')) {
+                const data = line.substring(5).trim()
+                if (data && data !== '[DONE]') {
+                  try {
+                    const parsed = JSON.parse(data)
+                    oauthCollectedChunks.push(parsed)
+                  } catch (e) {
+                    // 解析失败，忽略
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            // 忽略解析错误
+          }
         }
         res.end()
+
+        // 合并 OAuth 流式响应为一条清晰的结构
+        let oauthTextContent = ''
+        let oauthFinishReason = ''
+        for (const chunk of oauthCollectedChunks) {
+          const candidates = chunk.candidates || chunk.response?.candidates
+          if (candidates && candidates[0]) {
+            if (candidates[0].content?.parts) {
+              for (const part of candidates[0].content.parts) {
+                if (part.text) {
+                  oauthTextContent += part.text
+                }
+              }
+            }
+            if (candidates[0].finishReason) {
+              oauthFinishReason = candidates[0].finishReason
+            }
+          }
+        }
+        const oauthMergedOutput = {
+          finish_reason: oauthFinishReason,
+          text: oauthTextContent,
+          usage: {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0
+          },
+          model: model
+        }
+        // 记录 OAuth 流式请求日志
+        const oauthStreamDuration = Date.now() - startTime
+        recordRequestLog({
+          apiKeyId: apiKeyData.id,
+          apiKeyName: apiKeyData.name,
+          accountId: accountId,
+          accountType: 'gemini',
+          model: model,
+          status: 'success',
+          statusCode: 200,
+          duration: oauthStreamDuration,
+          inputTokens: 0,
+          outputTokens: 0,
+          clientIp: req.ip || req.connection?.remoteAddress,
+          userAgent: req.headers['user-agent'],
+          requestPath: req.path,
+          input: JSON.stringify(req.body).substring(0, 10000),
+          output: JSON.stringify(oauthMergedOutput).substring(0, 50000)
+        })
       }
     } else {
       // 非流式响应
       res.json(geminiResponse)
+
+      // 记录非流式请求日志
+      const nonStreamDuration = Date.now() - startTime
+      const usage = geminiResponse.usage || {}
+      recordRequestLog({
+        apiKeyId: apiKeyData.id,
+        apiKeyName: apiKeyData.name,
+        accountId: accountId,
+        accountType: isApiAccount ? 'gemini-api' : 'gemini',
+        model: model,
+        status: 'success',
+        statusCode: 200,
+        duration: nonStreamDuration,
+        inputTokens: usage.prompt_tokens || 0,
+        outputTokens: usage.completion_tokens || 0,
+        clientIp: req.ip || req.connection?.remoteAddress,
+        userAgent: req.headers['user-agent'],
+        requestPath: req.path,
+        input: JSON.stringify(req.body).substring(0, 10000),
+        output: JSON.stringify(geminiResponse).substring(0, 50000)
+      })
     }
 
     const duration = Date.now() - startTime
@@ -1824,6 +1975,7 @@ async function handleStreamGenerateContent(req, res) {
  * 处理标准 Gemini API 格式的 generateContent（支持 OAuth 和 API 账户）
  */
 async function handleStandardGenerateContent(req, res) {
+  const startTime = Date.now()
   let account = null
   let sessionHash = null
   let accountId = null
@@ -2056,6 +2208,27 @@ async function handleStandardGenerateContent(req, res) {
     }
 
     res.json(response.response || response)
+
+    // 记录请求日志
+    const duration = Date.now() - startTime
+    const usage = response?.response?.usageMetadata || {}
+    recordRequestLog({
+      apiKeyId: req.apiKey.id,
+      apiKeyName: req.apiKey.name,
+      accountId: accountId,
+      accountType: isApiAccount ? 'gemini-api' : 'gemini',
+      model: req.params.modelName || 'gemini-2.0-flash-exp',
+      status: 'success',
+      statusCode: 200,
+      duration: duration,
+      inputTokens: usage.promptTokenCount || 0,
+      outputTokens: usage.candidatesTokenCount || 0,
+      clientIp: req.ip || req.connection?.remoteAddress,
+      userAgent: req.headers['user-agent'],
+      requestPath: req.path,
+      input: JSON.stringify(req.body).substring(0, 10000),
+      output: JSON.stringify(response.response || response).substring(0, 50000)
+    })
   } catch (error) {
     logger.error(`Error in standard generateContent endpoint`, {
       message: error.message,
@@ -2078,6 +2251,7 @@ async function handleStandardGenerateContent(req, res) {
  * 处理标准 Gemini API 格式的 streamGenerateContent（支持 OAuth 和 API 账户）
  */
 async function handleStandardStreamGenerateContent(req, res) {
+  const startTime = Date.now()
   let abortController = null
   let account = null
   let sessionHash = null
@@ -2329,6 +2503,7 @@ async function handleStandardStreamGenerateContent(req, res) {
       candidatesTokenCount: 0,
       totalTokenCount: 0
     }
+    const collectedChunks = [] // 收集完整的响应 JSON 块
 
     let heartbeatTimer = null
     let lastDataTime = Date.now()
@@ -2375,6 +2550,9 @@ async function handleStandardStreamGenerateContent(req, res) {
           } else if (parsed.response?.usageMetadata) {
             totalUsage = parsed.response.usageMetadata
           }
+
+          // 收集完整的响应 JSON
+          collectedChunks.push(parsed.response || parsed)
 
           processedPayload = JSON.stringify(parsed.response || parsed)
         } catch (e) {
@@ -2444,6 +2622,54 @@ async function handleStandardStreamGenerateContent(req, res) {
       }
 
       res.end()
+
+      // 合并流式响应为一条清晰的结构
+      const streamDuration = Date.now() - startTime
+      let stdTextContent = ''
+      let stdFinishReason = ''
+      for (const chunk of collectedChunks) {
+        const candidates = chunk.candidates
+        if (candidates && candidates[0]) {
+          if (candidates[0].content?.parts) {
+            for (const part of candidates[0].content.parts) {
+              if (part.text) {
+                stdTextContent += part.text
+              }
+            }
+          }
+          if (candidates[0].finishReason) {
+            stdFinishReason = candidates[0].finishReason
+          }
+        }
+      }
+      const stdMergedOutput = {
+        finish_reason: stdFinishReason,
+        text: stdTextContent,
+        usage: {
+          prompt_tokens: totalUsage.promptTokenCount || 0,
+          completion_tokens: totalUsage.candidatesTokenCount || 0,
+          total_tokens: totalUsage.totalTokenCount || 0
+        },
+        model: model
+      }
+      // 记录流式请求日志
+      recordRequestLog({
+        apiKeyId: req.apiKey.id,
+        apiKeyName: req.apiKey.name,
+        accountId: accountId,
+        accountType: isApiAccount ? 'gemini-api' : 'gemini',
+        model: model,
+        status: 'success',
+        statusCode: 200,
+        duration: streamDuration,
+        inputTokens: totalUsage.promptTokenCount || 0,
+        outputTokens: totalUsage.candidatesTokenCount || 0,
+        clientIp: req.ip || req.connection?.remoteAddress,
+        userAgent: req.headers['user-agent'],
+        requestPath: req.path,
+        input: JSON.stringify(req.body).substring(0, 10000),
+        output: JSON.stringify(stdMergedOutput).substring(0, 50000)
+      })
 
       if (totalUsage.totalTokenCount > 0) {
         apiKeyService
