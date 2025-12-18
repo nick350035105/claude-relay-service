@@ -385,10 +385,34 @@ router.post('/one-click-update', authenticateAdmin, async (req, res) => {
       })
     }
 
-    // Step 3: Git pull
+    // Step 2.5: 检查并暂存本地修改
+    addLog('info', '检查本地修改...')
+    let hasLocalChanges = false
+    let modifiedFiles = []
+    try {
+      const { stdout: statusOut } = await execAsync('git status --porcelain', { cwd: projectRoot })
+      if (statusOut.trim().length > 0) {
+        hasLocalChanges = true
+        // 解析修改的文件列表
+        modifiedFiles = statusOut
+          .trim()
+          .split('\n')
+          .map((line) => line.substring(3).trim())
+          .filter((f) => f.length > 0)
+        addLog('info', `检测到 ${modifiedFiles.length} 个本地修改的文件，正在暂存...`)
+        await execAsync('git stash push -m "auto-stash-before-update"', { cwd: projectRoot })
+        addLog('success', '本地修改已暂存')
+      } else {
+        addLog('info', '无本地修改')
+      }
+    } catch (err) {
+      addLog('warn', `检查本地修改时出现警告: ${err.message}`)
+    }
+
+    // Step 3: Git pull (使用 rebase 策略)
     addLog('info', '拉取最新代码...')
     try {
-      const { stdout: pullOut, stderr: pullErr } = await execAsync('git pull origin main', {
+      const { stdout: pullOut, stderr: pullErr } = await execAsync('git pull --rebase origin main', {
         cwd: projectRoot,
         timeout: 120000
       })
@@ -401,12 +425,63 @@ router.post('/one-click-update', authenticateAdmin, async (req, res) => {
       }
     } catch (err) {
       addLog('error', `Git pull 失败: ${err.message}`)
+      // 如果 rebase 失败，尝试终止 rebase
+      try {
+        await execAsync('git rebase --abort', { cwd: projectRoot })
+        addLog('warn', 'Rebase 已终止')
+      } catch (abortErr) {
+        // 忽略，可能没有正在进行的 rebase
+      }
+      // 恢复 stash
+      if (hasLocalChanges) {
+        try {
+          await execAsync('git stash pop', { cwd: projectRoot })
+          addLog('info', '已恢复本地修改')
+        } catch (popErr) {
+          addLog('warn', `恢复本地修改失败: ${popErr.message}`)
+        }
+      }
       return res.status(500).json({
         success: false,
         message: 'Git pull 失败，可能存在冲突或权限问题',
         error: err.message,
         logs
       })
+    }
+
+    // Step 3.5: 恢复本地修改
+    if (hasLocalChanges) {
+      addLog('info', '恢复本地修改...')
+      try {
+        await execAsync('git stash pop', { cwd: projectRoot })
+        addLog('success', '本地修改已恢复')
+      } catch (err) {
+        // stash pop 有冲突，使用本地修改覆盖
+        addLog('warn', `恢复本地修改时出现冲突，将保留本地修改...`)
+        try {
+          // 对于每个修改的文件，从 stash 中恢复
+          for (const file of modifiedFiles) {
+            try {
+              await execAsync(`git checkout stash@{0} -- "${file}"`, { cwd: projectRoot })
+            } catch (fileErr) {
+              // 文件可能在 stash 中不存在，忽略
+            }
+          }
+          // 清理 stash
+          await execAsync('git stash drop', { cwd: projectRoot })
+          // 重置冲突状态
+          await execAsync('git reset HEAD', { cwd: projectRoot })
+          addLog('success', '冲突已自动解决（保留本地修改）')
+        } catch (resolveErr) {
+          addLog('warn', `自动解决冲突时出现问题: ${resolveErr.message}`)
+          // 尝试强制丢弃 stash
+          try {
+            await execAsync('git stash drop', { cwd: projectRoot })
+          } catch (dropErr) {
+            // 忽略
+          }
+        }
+      }
     }
 
     // Step 4: 安装依赖
