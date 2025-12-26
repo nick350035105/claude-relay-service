@@ -596,8 +596,9 @@ async function handleMessages(req, res) {
                   }
                 }
               }
-              if (candidates[0].finishReason) {
-                finishReason = candidates[0].finishReason
+              const [{ finishReason: candidateFinishReason }] = candidates
+              if (candidateFinishReason) {
+                finishReason = candidateFinishReason
               }
             }
           }
@@ -609,15 +610,15 @@ async function handleMessages(req, res) {
               completion_tokens: totalUsage.candidatesTokenCount || 0,
               total_tokens: totalUsage.totalTokenCount || 0
             },
-            model: model
+            model
           }
           // 记录流式请求日志
           recordRequestLog({
             apiKeyId: apiKeyData.id,
             apiKeyName: apiKeyData.name,
-            accountId: accountId,
+            accountId,
             accountType: 'gemini-api',
-            model: model,
+            model,
             status: 'success',
             statusCode: 200,
             duration: streamDuration,
@@ -723,16 +724,16 @@ async function handleMessages(req, res) {
             completion_tokens: 0,
             total_tokens: 0
           },
-          model: model
+          model
         }
         // 记录 OAuth 流式请求日志
         const oauthStreamDuration = Date.now() - startTime
         recordRequestLog({
           apiKeyId: apiKeyData.id,
           apiKeyName: apiKeyData.name,
-          accountId: accountId,
+          accountId,
           accountType: 'gemini',
-          model: model,
+          model,
           status: 'success',
           statusCode: 200,
           duration: oauthStreamDuration,
@@ -755,9 +756,9 @@ async function handleMessages(req, res) {
       recordRequestLog({
         apiKeyId: apiKeyData.id,
         apiKeyName: apiKeyData.name,
-        accountId: accountId,
+        accountId,
         accountType: isApiAccount ? 'gemini-api' : 'gemini',
-        model: model,
+        model,
         status: 'success',
         statusCode: 200,
         duration: nonStreamDuration,
@@ -2215,12 +2216,12 @@ async function handleStandardGenerateContent(req, res) {
     recordRequestLog({
       apiKeyId: req.apiKey.id,
       apiKeyName: req.apiKey.name,
-      accountId: accountId,
+      accountId,
       accountType: isApiAccount ? 'gemini-api' : 'gemini',
       model: req.params.modelName || 'gemini-2.0-flash-exp',
       status: 'success',
       statusCode: 200,
-      duration: duration,
+      duration,
       inputTokens: usage.promptTokenCount || 0,
       outputTokens: usage.candidatesTokenCount || 0,
       clientIp: req.ip || req.connection?.remoteAddress,
@@ -2628,7 +2629,7 @@ async function handleStandardStreamGenerateContent(req, res) {
       let stdTextContent = ''
       let stdFinishReason = ''
       for (const chunk of collectedChunks) {
-        const candidates = chunk.candidates
+        const { candidates } = chunk
         if (candidates && candidates[0]) {
           if (candidates[0].content?.parts) {
             for (const part of candidates[0].content.parts) {
@@ -2650,15 +2651,15 @@ async function handleStandardStreamGenerateContent(req, res) {
           completion_tokens: totalUsage.candidatesTokenCount || 0,
           total_tokens: totalUsage.totalTokenCount || 0
         },
-        model: model
+        model
       }
       // 记录流式请求日志
       recordRequestLog({
         apiKeyId: req.apiKey.id,
         apiKeyName: req.apiKey.name,
-        accountId: accountId,
+        accountId,
         accountType: isApiAccount ? 'gemini-api' : 'gemini',
-        model: model,
+        model,
         status: 'success',
         statusCode: 200,
         duration: streamDuration,

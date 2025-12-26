@@ -409,8 +409,11 @@ router.post('/one-click-update', authenticateAdmin, async (req, res) => {
       addLog('warn', `检查本地修改时出现警告: ${err.message}`)
     }
 
-    // Step 3: Git pull (使用 rebase 策略)
+    // Step 3: Git pull (使用 rebase 策略，自动解决冲突)
     addLog('info', '拉取最新代码...')
+    let rebaseSuccess = false
+    let maxConflictRetries = 20 // 最多处理 20 个冲突提交
+
     try {
       const { stdout: pullOut, stderr: pullErr } = await execAsync('git pull --rebase origin main', {
         cwd: projectRoot,
@@ -418,35 +421,121 @@ router.post('/one-click-update', authenticateAdmin, async (req, res) => {
       })
       const pullMessage = pullOut || pullErr || '无输出'
       addLog('success', `Git pull 完成: ${pullMessage.trim()}`)
+      rebaseSuccess = true
 
       // 检查是否已经是最新
       if (pullMessage.includes('Already up to date') || pullMessage.includes('已经是最新')) {
         addLog('info', '代码已是最新版本')
       }
     } catch (err) {
-      addLog('error', `Git pull 失败: ${err.message}`)
-      // 如果 rebase 失败，尝试终止 rebase
-      try {
-        await execAsync('git rebase --abort', { cwd: projectRoot })
-        addLog('warn', 'Rebase 已终止')
-      } catch (abortErr) {
-        // 忽略，可能没有正在进行的 rebase
-      }
-      // 恢复 stash
-      if (hasLocalChanges) {
+      addLog('warn', `Git pull 遇到冲突，尝试自动解决...`)
+
+      // 循环处理 rebase 冲突
+      for (let i = 0; i < maxConflictRetries; i++) {
         try {
-          await execAsync('git stash pop', { cwd: projectRoot })
-          addLog('info', '已恢复本地修改')
-        } catch (popErr) {
-          addLog('warn', `恢复本地修改失败: ${popErr.message}`)
+          // 检查是否有正在进行的 rebase
+          const { stdout: rebaseCheck } = await execAsync('git status', { cwd: projectRoot })
+          if (!rebaseCheck.includes('rebase in progress') && !rebaseCheck.includes('正在变基')) {
+            // rebase 已完成或未开始
+            rebaseSuccess = true
+            break
+          }
+
+          // 获取冲突文件列表
+          const { stdout: conflictFiles } = await execAsync('git diff --name-only --diff-filter=U', { cwd: projectRoot })
+          const conflicts = conflictFiles.trim().split('\n').filter((f) => f.length > 0)
+
+          if (conflicts.length === 0) {
+            // 没有冲突，继续 rebase
+            try {
+              await execAsync('git rebase --continue', { cwd: projectRoot, timeout: 30000 })
+            } catch (contErr) {
+              // 可能需要 skip
+              if (contErr.message.includes('No changes')) {
+                await execAsync('git rebase --skip', { cwd: projectRoot })
+                addLog('info', `跳过空提交 (${i + 1}/${maxConflictRetries})`)
+              }
+            }
+            continue
+          }
+
+          addLog('info', `发现 ${conflicts.length} 个冲突文件，自动解决中... (${i + 1}/${maxConflictRetries})`)
+
+          // 对于每个冲突文件，选择远程版本（theirs = origin/main 的版本）
+          for (const file of conflicts) {
+            try {
+              // 使用 theirs 策略：接受远程更新
+              await execAsync(`git checkout --theirs "${file}"`, { cwd: projectRoot })
+              await execAsync(`git add "${file}"`, { cwd: projectRoot })
+              addLog('info', `已解决冲突: ${file}`)
+            } catch (resolveErr) {
+              addLog('warn', `解决 ${file} 冲突失败: ${resolveErr.message}`)
+            }
+          }
+
+          // 继续 rebase
+          try {
+            await execAsync('GIT_EDITOR=true git rebase --continue', {
+              cwd: projectRoot,
+              timeout: 30000,
+              env: { ...process.env, GIT_EDITOR: 'true' }
+            })
+          } catch (contErr) {
+            // 检查是否还有更多冲突需要处理
+            if (!contErr.message.includes('CONFLICT')) {
+              // 可能已完成
+              const { stdout: statusCheck } = await execAsync('git status', { cwd: projectRoot })
+              if (!statusCheck.includes('rebase in progress')) {
+                rebaseSuccess = true
+                break
+              }
+            }
+          }
+        } catch (loopErr) {
+          addLog('warn', `冲突解决循环出错: ${loopErr.message}`)
+          break
         }
       }
-      return res.status(500).json({
-        success: false,
-        message: 'Git pull 失败，可能存在冲突或权限问题',
-        error: err.message,
-        logs
-      })
+
+      // 最终检查 rebase 状态
+      if (!rebaseSuccess) {
+        try {
+          const { stdout: finalStatus } = await execAsync('git status', { cwd: projectRoot })
+          if (!finalStatus.includes('rebase in progress') && !finalStatus.includes('正在变基')) {
+            rebaseSuccess = true
+          }
+        } catch (checkErr) {
+          // 忽略
+        }
+      }
+
+      if (rebaseSuccess) {
+        addLog('success', '冲突已自动解决，代码更新完成')
+      } else {
+        // 放弃 rebase，恢复原状
+        addLog('error', '无法自动解决所有冲突')
+        try {
+          await execAsync('git rebase --abort', { cwd: projectRoot })
+          addLog('warn', 'Rebase 已终止')
+        } catch (abortErr) {
+          // 忽略
+        }
+        // 恢复 stash
+        if (hasLocalChanges) {
+          try {
+            await execAsync('git stash pop', { cwd: projectRoot })
+            addLog('info', '已恢复本地修改')
+          } catch (popErr) {
+            addLog('warn', `恢复本地修改失败: ${popErr.message}`)
+          }
+        }
+        return res.status(500).json({
+          success: false,
+          message: 'Git pull 失败，存在无法自动解决的冲突',
+          error: err.message,
+          logs
+        })
+      }
     }
 
     // Step 3.5: 恢复本地修改

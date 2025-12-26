@@ -75,6 +75,9 @@ class ServiceManager {
     const status = this.getStatus()
     if (status.running) {
       console.log(`⚠️  服务已在运行中 (PID: ${status.pid})`)
+      if (daemon) {
+        process.exit(0) // daemon 模式下必须退出，否则 npm 会卡住
+      }
       return false
     }
 

@@ -497,7 +497,7 @@ async function handleMessagesRequest(req, res) {
                     cache_read_input_tokens: cacheReadTokens,
                     total_tokens: inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
                   },
-                  model: model
+                  model
                 }
                 // 直接在回调中记录日志，确保数据已收集完成
                 const streamDuration = Date.now() - startTime
@@ -505,15 +505,15 @@ async function handleMessagesRequest(req, res) {
                   apiKeyId: req.apiKey.id,
                   apiKeyName: req.apiKey.name,
                   accountId: usageAccountId || accountId,
-                  accountType: accountType,
-                  model: model,
+                  accountType,
+                  model,
                   status: 'success',
                   statusCode: 200,
                   duration: streamDuration,
-                  inputTokens: inputTokens,
-                  outputTokens: outputTokens,
-                  cacheCreateTokens: cacheCreateTokens,
-                  cacheReadTokens: cacheReadTokens,
+                  inputTokens,
+                  outputTokens,
+                  cacheCreateTokens,
+                  cacheReadTokens,
                   clientIp: req.ip || req.connection?.remoteAddress,
                   userAgent: req.headers['user-agent'],
                   requestPath: req.path,
@@ -772,8 +772,8 @@ async function handleMessagesRequest(req, res) {
           recordRequestLog({
             apiKeyId: req.apiKey.id,
             apiKeyName: req.apiKey.name,
-            accountId: accountId,
-            accountType: accountType,
+            accountId,
+            accountType,
             model: req.body.model,
             status: 'success',
             statusCode: 200,
@@ -1163,7 +1163,7 @@ async function handleMessagesRequest(req, res) {
           apiKeyName: req.apiKey.name,
           accountId: response.accountId || accountId,
           accountName: response.accountName,
-          accountType: accountType,
+          accountType,
           model: jsonData.model || req.body.model,
           status: response.statusCode >= 200 && response.statusCode < 300 ? 'success' : 'error',
           statusCode: response.statusCode,

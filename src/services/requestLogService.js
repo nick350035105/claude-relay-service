@@ -93,10 +93,18 @@ async function getLogs(options = {}) {
       const log = JSON.parse(logData)
 
       // 应用过滤条件
-      if (apiKeyId && log.apiKeyId !== apiKeyId) continue
-      if (accountId && log.accountId !== accountId) continue
-      if (model && log.model !== model) continue
-      if (status && log.status !== status) continue
+      if (apiKeyId && log.apiKeyId !== apiKeyId) {
+        continue
+      }
+      if (accountId && log.accountId !== accountId) {
+        continue
+      }
+      if (model && log.model !== model) {
+        continue
+      }
+      if (status && log.status !== status) {
+        continue
+      }
 
       logs.push(log)
     }
@@ -173,11 +181,11 @@ async function getLogDetail(logId) {
       ...log,
       input:
         log.input && log.input.length > maxLength
-          ? log.input.substring(0, maxLength) + '... [已截断]'
+          ? `${log.input.substring(0, maxLength)}... [已截断]`
           : log.input,
       output:
         log.output && log.output.length > maxLength
-          ? log.output.substring(0, maxLength) + '... [已截断]'
+          ? `${log.output.substring(0, maxLength)}... [已截断]`
           : log.output
     }
   } catch (error) {
