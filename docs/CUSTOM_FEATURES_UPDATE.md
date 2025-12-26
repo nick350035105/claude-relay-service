@@ -136,9 +136,75 @@ fi
 }
 ```
 
+## 一键更新自动解决冲突
+
+### 功能说明
+
+管理后台的「一键更新」按钮现在支持自动解决 Git rebase 冲突，无需手动干预。
+
+### 工作流程
+
+1. **暂存本地修改** - 检测未提交的本地修改，自动 `git stash`
+2. **拉取远程更新** - 执行 `git pull --rebase origin main`
+3. **自动解决冲突** - 如果 rebase 遇到冲突：
+   - 循环处理最多 20 个冲突提交
+   - 自动检测冲突文件
+   - 使用 `--theirs` 策略接受远程更新
+   - 执行 `git add` 和 `git rebase --continue`
+   - 空提交自动 skip
+4. **恢复本地修改** - 更新完成后 `git stash pop`
+5. **安装依赖** - 执行 `npm install`
+6. **重启服务** - 3 秒后自动重启
+
+### 冲突解决策略
+
+| 场景 | 处理方式 |
+|------|----------|
+| 代码冲突 | 接受远程版本（`--theirs`） |
+| 空提交 | 自动跳过（`git rebase --skip`） |
+| 无法解决 | 终止 rebase，恢复原状 |
+
+### 核心代码位置
+
+```
+src/routes/admin/system.js  # router.post('/one-click-update', ...)
+```
+
+### 日志输出示例
+
+```
+[info] 开始一键更新...
+[info] 设置 Git 远程地址: git@github.com:Wei-Shaw/claude-relay-service.git
+[success] Git 远程地址设置成功
+[info] 获取远程更新...
+[success] Git fetch 完成
+[info] 检查本地修改...
+[info] 检测到 4 个本地修改的文件，正在暂存...
+[success] 本地修改已暂存
+[info] 拉取最新代码...
+[warn] Git pull 遇到冲突，尝试自动解决...
+[info] 发现 1 个冲突文件，自动解决中... (1/20)
+[info] 已解决冲突: src/routes/admin/system.js
+[success] 冲突已自动解决，代码更新完成
+[info] 恢复本地修改...
+[success] 本地修改已恢复
+[info] 安装依赖...
+[success] npm install 完成
+[success] 新版本: 1.2.3
+[info] 准备重启服务...
+```
+
+### 失败处理
+
+如果自动解决失败，系统会：
+1. 执行 `git rebase --abort` 终止 rebase
+2. 执行 `git stash pop` 恢复本地修改
+3. 返回错误信息，保持原有状态不变
+
 ## 注意事项
 
 1. **不要在 my-features 分支上执行 `git pull`**，应该通过 rebase main 来同步
 2. **重大冲突时**，可以考虑重新在最新代码上实现功能
 3. **日志自动清理**：3 天前的日志会自动清理（每小时检查一次）
 4. **构建前端**：每次更新后都需要重新构建前端 `npm run build:web`
+5. **一键更新使用 theirs 策略**：冲突时会接受远程版本，本地自定义修改需要在更新后重新应用
